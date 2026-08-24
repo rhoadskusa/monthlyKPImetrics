@@ -7,8 +7,10 @@ directory that's under version control. The first time this runs, a file
 picker prompts you to select your .env file from wherever you keep it; the
 chosen path is then remembered in ".env_location" (gitignored, just a text
 file containing a path, no secrets) so you aren't asked again on future
-runs. Delete ".env_location" (or set KPI_ENV_FILE) to point at a different
-.env file. See ".env.example" for the full list of required keys.
+runs. Run with --select-env to always be prompted (e.g. if you switch
+between multiple .env files), or set KPI_ENV_FILE to skip the prompt
+entirely and point straight at a specific file. See ".env.example" for the
+full list of required keys.
 
 Nothing in this file should ever print or log a secret value -- only whether
 it was found.
@@ -62,7 +64,11 @@ def _resolve_env_path() -> Path:
             sys.exit(f"KPI_ENV_FILE is set but points to a file that doesn't exist: {path}")
         return path
 
-    if ENV_LOCATION_POINTER.exists():
+    # Set by main.py when run with --select-env: skip the remembered
+    # .env_location and always show the picker.
+    force_prompt = os.environ.get("KPI_FORCE_ENV_PROMPT", "").strip().lower() in ("1", "true", "yes")
+
+    if not force_prompt and ENV_LOCATION_POINTER.exists():
         remembered = Path(ENV_LOCATION_POINTER.read_text(encoding="utf-8").strip())
         if remembered.is_file():
             return remembered

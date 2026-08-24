@@ -24,6 +24,7 @@ Setup:
 Usage:
     python main.py                  # reports on the previous calendar month
     python main.py --period 2026-07 # reports on a specific month (YYYY-MM)
+    python main.py --select-env     # always prompt for the .env file, ignoring ".env_location"
 
 Output:
     output/<year>_<month>_metrics_report.xlsx
@@ -35,8 +36,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import date
+
+# config.py resolves (and may prompt for) the .env file as soon as it's
+# imported, so --select-env has to be caught here, before that import,
+# rather than after the full argparse parse in main().
+if "--select-env" in sys.argv:
+    os.environ["KPI_FORCE_ENV_PROMPT"] = "1"
 
 import config
 from calculations import (
@@ -64,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Target report month, formatted YYYY-MM. Defaults to REPORT_PERIOD in .env, "
         "or the previous calendar month if that's also unset.",
+    )
+    parser.add_argument(
+        "--select-env",
+        action="store_true",
+        help="Always prompt for the .env file to use, ignoring any remembered .env_location.",
     )
     return parser.parse_args()
 
