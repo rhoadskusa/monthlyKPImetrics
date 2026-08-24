@@ -104,10 +104,14 @@ DB_SERVER = _require_env("DB_SERVER")
 DB_NAME = _require_env("DB_NAME")
 # The exact name of the ODBC driver installed on this machine (as it
 # appears in "ODBC Data Sources" on Windows), without surrounding braces --
-# those get added when building the connection string. Common values:
-# "ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server", or the
-# older driver that ships with Windows, "SQL Server".
+# those get added when building the connection string. If you're not sure
+# what's installed, run: python -c "import pyodbc; print(pyodbc.drivers())"
 DB_DRIVER = _optional_env("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+# Whether to add Encrypt=... to the connection string. Left blank (the
+# default) omits it entirely and lets the driver decide -- this matches
+# other working scripts against this same database. Set to "yes" or "no"
+# only if you specifically need to force one or the other.
+DB_ENCRYPT = _optional_env("DB_ENCRYPT", "")
 DB_TRUSTED_CONNECTION = _optional_env("DB_TRUSTED_CONNECTION", "no").lower() in (
     "yes",
     "true",
