@@ -128,12 +128,30 @@ def _load_single_file(path: Path, use_cache: bool = True) -> pd.DataFrame:
     return df
 
 
+def _dedupe_by_wo_number(df: pd.DataFrame) -> pd.DataFrame:
+    """Yardi's monthly scheduler re-pulls a rolling window, so the same WO#
+    commonly shows up in more than one month's export -- e.g. still open
+    when last month's file was generated, "Work Completed" by this month's.
+    Keep the most complete record per ticket rather than trusting file/name
+    ordering: a row with a Complete Date wins over one without, and among
+    rows that both have one, the latest Complete Date wins.
+    """
+    ranked = df.copy()
+    complete_date = pd.to_datetime(ranked["Complete Date"], errors="coerce")
+    ranked["_has_complete_date"] = complete_date.notna()
+    ranked["_complete_date_sort"] = complete_date
+    ranked = ranked.sort_values(by=["_has_complete_date", "_complete_date_sort"])
+    deduped = ranked.drop_duplicates(subset="WO#", keep="last")
+    return deduped.drop(columns=["_has_complete_date", "_complete_date_sort"]).sort_index()
+
+
 def load_work_orders(work_order_dir: Path, use_cache: bool = True) -> pd.DataFrame:
     """Load and concatenate every Work Order Directory export in a folder.
 
     Each file is parsed once and cached as Parquet next to it (see
     _load_single_file); subsequent runs read the cache instead of
-    re-parsing the slow, hyperlink-heavy .xlsx.
+    re-parsing the slow, hyperlink-heavy .xlsx. Tickets appearing in more
+    than one file (see _dedupe_by_wo_number) are collapsed to one row.
     """
     files = sorted(work_order_dir.glob("*.xlsx"))
     if not files:
@@ -141,7 +159,13 @@ def load_work_orders(work_order_dir: Path, use_cache: bool = True) -> pd.DataFra
 
     frames = [_load_single_file(f, use_cache) for f in files]
     df = pd.concat(frames, ignore_index=True)
-    df = df.drop_duplicates(subset="WO#", keep="last")
+
+    before = len(df)
+    df = _dedupe_by_wo_number(df)
+    removed = before - len(df)
+    if removed:
+        log.info("Removed %d duplicate work order ticket(s) found across multiple exports", removed)
+
     log.info("Loaded %d work order tickets from %d file(s)", len(df), len(files))
     return df
 

@@ -93,5 +93,67 @@ class WorkOrdersTests(unittest.TestCase):
         self.assertIsNone(avg)
 
 
+def _build_single_ticket_workbook(path: Path, wo_number: str, status: str, complete_date) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Report1"
+    ws.append(["Work Order Directory"])
+    ws.append(["Property : All Active MFM Properites (.active)"])
+    ws.append([
+        "WO#", "Property", "Unit", "Building", "Priority", "Status", "Category",
+        "Brief Desc.", "Call Date", "Schedule Date", "Complete Date",
+        "Material Amount", "Labor Amount", "Commission Amount", "Total Payable Amount",
+    ])
+    ws.append(["Property : 100"])
+    ws.append([
+        wo_number, "100", "210", "1", "High", status, "Apartment - Exterior",
+        "key", datetime(2026, 6, 5, 9, 0), None, complete_date, 0, 0, 0, 0,
+    ])
+    ws.append(["Total ( 1 )", None, None, None, None, None, None, None, None, None, None, 0, 0, 0, 0])
+    wb.save(path)
+
+
+class DedupeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_keeps_completed_record_even_when_its_file_sorts_first(self):
+        # "a_..." sorts before "b_..." alphabetically, but the completed
+        # record is in the alphabetically-earlier file -- a naive
+        # "keep last file" dedupe would wrongly keep the still-open row.
+        _build_single_ticket_workbook(self.dir / "a_still_open_snapshot.xlsx", "9001", "Call", None)
+        _build_single_ticket_workbook(
+            self.dir / "b_completed_snapshot.xlsx", "9001", "Work Completed", datetime(2026, 6, 10, 12, 0)
+        )
+        df = load_work_orders(self.dir)
+        self.assertEqual(len(df), 1)
+        row = df.iloc[0]
+        self.assertEqual(row["Status"], "Work Completed")
+        self.assertIsNotNone(row["Complete Date"])
+
+    def test_keeps_completed_record_when_completed_file_sorts_first(self):
+        _build_single_ticket_workbook(
+            self.dir / "a_completed_snapshot.xlsx", "9002", "Work Completed", datetime(2026, 6, 10, 12, 0)
+        )
+        _build_single_ticket_workbook(self.dir / "b_still_open_snapshot.xlsx", "9002", "Call", None)
+        df = load_work_orders(self.dir)
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]["Status"], "Work Completed")
+
+    def test_no_duplicates_left_across_three_files(self):
+        _build_single_ticket_workbook(self.dir / "jan.xlsx", "9003", "Call", None)
+        _build_single_ticket_workbook(self.dir / "feb.xlsx", "9003", "In Progress", None)
+        _build_single_ticket_workbook(
+            self.dir / "mar.xlsx", "9003", "Work Completed", datetime(2026, 3, 15, 9, 0)
+        )
+        df = load_work_orders(self.dir)
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]["Status"], "Work Completed")
+
+
 if __name__ == "__main__":
     unittest.main()
