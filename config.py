@@ -56,11 +56,9 @@ AIRTABLE_BASE_ID = _require_env("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_PROPERTIES = _require_env("AIRTABLE_TABLE_PROPERTIES")
 
 # PropStatus values that count as "active portfolio" for this report.
-# Mirrors the convention used by the user's existing airtable_extractor.py.
 ACTIVE_PROPSTATUS_VALUES = {
     "Active / Owned & Managed",
     "Active / Owned & 3PM",
-    "Lease-up",
 }
 
 # --- Yardi work order exports ---

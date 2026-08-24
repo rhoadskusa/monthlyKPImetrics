@@ -1,15 +1,6 @@
 """
-Parameterized SQL against the ParentCO Yardi-backed database.
-
-*** OPEN ITEM ***
-PM_Budgets column names for amount/period/property are still unconfirmed --
-the constants below (BUDGET_*) are best-guess placeholders. Before relying
-on budget figures, run:
-    SELECT TOP 5 * FROM PM_Budgets WHERE pmb_type = 'BUD'
-and fix BUDGET_AMOUNT_COL / BUDGET_DATE_COL / BUDGET_PROPCODE_COL to match.
-
-Everything else here (uvwGL_PMTrialBals, PM_Units, PM_UnitAvailability) uses
-confirmed real column names.
+Parameterized SQL against the ParentCO Yardi-backed database. All table/
+column names below are confirmed real schema.
 """
 
 from __future__ import annotations
@@ -29,13 +20,13 @@ TRIALBAL_ACCTID_COL = "pmtb_acctid"
 TRIALBAL_ACTIVITY_COL = "pmtb_activityamt"
 TRIALBAL_PROPCODE_COL = "pmtb_propertycode"
 
-# --- PM_Budgets ---
+# --- PM_Budgets (one row per property/type/year/account; a column per
+# month -- pmb_MTD01 = January ... pmb_MTD12 = December) ---
 BUDGET_TABLE = "PM_Budgets"
 BUDGET_TYPE_COL = "pmb_type"
-BUDGET_ACCTID_COL = "pmb_acctid"  # TODO: confirm (acct_id integer form of pmb_acctnum)
-BUDGET_AMOUNT_COL = "pmb_amount"  # TODO: confirm real column name
-BUDGET_DATE_COL = "pmb_fdate"  # TODO: confirm real column name
-BUDGET_PROPCODE_COL = "pmb_propertycode"  # TODO: confirm real column name
+BUDGET_YEAR_COL = "pmb_year"
+BUDGET_ACCTNUM_COL = "pmb_acctnum"  # dashed text, e.g. "00-0000-000" -- strip dashes to match acct_id
+BUDGET_PROPCODE_COL = "pmb_propertycode"
 
 # --- PM_Units ---
 UNITS_TABLE = "PM_Units"
@@ -138,9 +129,21 @@ def budget_by_property(
     period_start: date,
     property_codes: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Sum budgeted amounts for the given accounts and month."""
-    acct_sql, acct_params = _placeholders("acct", acct_ids)
-    params = {**acct_params, "period_start": period_start}
+    """Sum budgeted amounts for the given accounts and month.
+
+    PM_Budgets stores one row per property/type/year/account, with a
+    separate column per month (pmb_MTD01 = January ... pmb_MTD12 =
+    December) rather than a date column -- so the month is picked by
+    selecting the matching MTD column, and the year is filtered separately.
+    pmb_acctnum is dashed text (e.g. "00-0000-000"); strip the dashes to
+    match against the integer acct_id.
+    """
+    if not 1 <= period_start.month <= 12:
+        raise ValueError(f"Invalid month: {period_start.month}")
+    month_col = f"pmb_MTD{period_start.month:02d}"
+
+    acct_sql, acct_params = _placeholders("acct", [str(acct_id) for acct_id in acct_ids])
+    params = {**acct_params, "year": period_start.year}
 
     property_filter = ""
     if property_codes:
@@ -151,11 +154,11 @@ def budget_by_property(
     sql = f"""
         SELECT
             TRIM({BUDGET_PROPCODE_COL}) AS property_code,
-            SUM({BUDGET_AMOUNT_COL}) AS total
+            SUM({month_col}) AS total
         FROM {BUDGET_TABLE}
         WHERE {BUDGET_TYPE_COL} = 'BUD'
-          AND {BUDGET_DATE_COL} = :period_start
-          AND {BUDGET_ACCTID_COL} IN ({acct_sql})
+          AND {BUDGET_YEAR_COL} = :year
+          AND REPLACE({BUDGET_ACCTNUM_COL}, '-', '') IN ({acct_sql})
           {property_filter}
     """
     return run_query(engine, sql, params)

@@ -234,6 +234,7 @@ def nearest_availability_snapshot(
 
 
 def _weighted_occupancy_pct(snapshot: pd.DataFrame) -> float | str:
+    """pua_pctocc is stored 0-100 (confirmed), so no scaling needed here."""
     if snapshot.empty:
         return NA
     total_units = snapshot["pua_units"].fillna(0).sum()
