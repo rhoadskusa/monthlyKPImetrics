@@ -16,6 +16,15 @@ Request Reassignment, Scheduled, Vendor Schedule, Web, Work Completed.
 Only "Work Completed" counts as closed for Closed Tickets / Avg Days to
 Close -- every other status is either still open or terminated without
 completed work (Canceled).
+
+Each .xlsx export gets a Parquet cache written next to it (same name,
+".parquet" extension) the first time it's parsed. Yardi work order exports
+carry a per-cell hyperlink back to the ticket/property/unit in Yardi, which
+makes openpyxl very slow to open on large files (e.g. a multi-year
+historical backfill) even though those links are irrelevant here -- the
+cache means that slow parse only ever happens once per file. See also
+convert_work_orders.py, a standalone script for pre-building the cache for
+a whole folder up front (handy for the initial historical backfill).
 """
 
 from __future__ import annotations
@@ -45,7 +54,11 @@ def _is_noise_row(first_cell) -> bool:
     return text.startswith("Property :") or text.startswith("Total (") or text.startswith("Grand Total(")
 
 
-def _load_single_file(path: Path) -> pd.DataFrame:
+def _parse_xlsx(path: Path) -> pd.DataFrame:
+    """Slow path: parse a raw Yardi .xlsx export. This is the step the
+    per-cell hyperlinks make expensive on large files -- avoid calling this
+    directly; go through _load_single_file() or convert_to_cache() instead
+    so the result gets cached."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb[wb.sheetnames[0]]
 
@@ -73,13 +86,60 @@ def _load_single_file(path: Path) -> pd.DataFrame:
     return df
 
 
-def load_work_orders(work_order_dir: Path) -> pd.DataFrame:
-    """Load and concatenate every Work Order Directory export in a folder."""
+def _cache_path_for(xlsx_path: Path) -> Path:
+    return xlsx_path.with_suffix(".parquet")
+
+
+def convert_to_cache(xlsx_path: Path, force: bool = False) -> tuple[Path, pd.DataFrame]:
+    """Parse one .xlsx export and write/refresh its Parquet cache.
+
+    Skips re-parsing if the cache already exists and is newer than the
+    source file, unless force=True. Returns (cache_path, dataframe).
+    Raises ImportError with a clear pip-install hint if pyarrow isn't
+    installed (pandas needs it to write/read Parquet).
+    """
+    cache_path = _cache_path_for(xlsx_path)
+    if not force and cache_path.exists() and cache_path.stat().st_mtime >= xlsx_path.stat().st_mtime:
+        return cache_path, pd.read_parquet(cache_path)
+
+    df = _parse_xlsx(xlsx_path)
+    try:
+        df.to_parquet(cache_path, index=False)
+    except ImportError as exc:
+        raise ImportError(
+            "Writing the work order cache requires pyarrow: pip install pyarrow"
+        ) from exc
+    return cache_path, df
+
+
+def _load_single_file(path: Path, use_cache: bool = True) -> pd.DataFrame:
+    if not use_cache:
+        return _parse_xlsx(path)
+
+    cache_path = _cache_path_for(path)
+    if cache_path.exists() and cache_path.stat().st_mtime >= path.stat().st_mtime:
+        return pd.read_parquet(cache_path)
+
+    try:
+        _, df = convert_to_cache(path, force=True)
+    except ImportError:
+        log.warning("pyarrow not installed -- parsing %s without caching (pip install pyarrow to speed up future runs)", path.name)
+        df = _parse_xlsx(path)
+    return df
+
+
+def load_work_orders(work_order_dir: Path, use_cache: bool = True) -> pd.DataFrame:
+    """Load and concatenate every Work Order Directory export in a folder.
+
+    Each file is parsed once and cached as Parquet next to it (see
+    _load_single_file); subsequent runs read the cache instead of
+    re-parsing the slow, hyperlink-heavy .xlsx.
+    """
     files = sorted(work_order_dir.glob("*.xlsx"))
     if not files:
         raise FileNotFoundError(f"No .xlsx work order exports found in {work_order_dir}")
 
-    frames = [_load_single_file(f) for f in files]
+    frames = [_load_single_file(f, use_cache) for f in files]
     df = pd.concat(frames, ignore_index=True)
     df = df.drop_duplicates(subset="WO#", keep="last")
     log.info("Loaded %d work order tickets from %d file(s)", len(df), len(files))
