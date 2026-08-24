@@ -15,16 +15,15 @@ Setup:
        (e.g. in your Documents or OneDrive) and fill in real SQL Server /
        AirTable credentials and the local OneDrive-synced work order
        folder path. NEVER commit .env or paste its contents anywhere.
-    2. The first time you run this, a file picker opens asking you to
-       select that .env file. The chosen path is remembered in
-       ".env_location" (gitignored) so you won't be asked again. To pick
-       a different .env later, delete ".env_location" or set the
-       KPI_ENV_FILE environment variable to the file's path.
+    2. By default, every run opens a file picker asking you to select
+       that .env file -- nothing is remembered between runs. If you'd
+       rather pick it once and have future runs reuse that choice
+       automatically, set REMEMBER_ENV_FILE = 1 below (the choice is then
+       saved to ".env_location", which is gitignored).
 
 Usage:
     python main.py                  # reports on the previous calendar month
     python main.py --period 2026-07 # reports on a specific month (YYYY-MM)
-    python main.py --select-env     # always prompt for the .env file, ignoring ".env_location"
 
 Output:
     output/<year>_<month>_metrics_report.xlsx
@@ -40,11 +39,17 @@ import os
 import sys
 from datetime import date
 
+# --- Remember the .env file after you pick it? -----------------------------
+#   0 = No (default). You're prompted for the .env file every run, and
+#       nothing gets written to ".env_location".
+#   1 = Yes. You're prompted once; the choice is saved to ".env_location"
+#       and reused automatically on every run after that.
+REMEMBER_ENV_FILE = 0
+# -----------------------------------------------------------------------------
+
 # config.py resolves (and may prompt for) the .env file as soon as it's
-# imported, so --select-env has to be caught here, before that import,
-# rather than after the full argparse parse in main().
-if "--select-env" in sys.argv:
-    os.environ["KPI_FORCE_ENV_PROMPT"] = "1"
+# imported, so this has to be set before that import.
+os.environ["KPI_REMEMBER_ENV"] = "1" if REMEMBER_ENV_FILE else "0"
 
 import config
 from calculations import (
@@ -72,11 +77,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Target report month, formatted YYYY-MM. Defaults to REPORT_PERIOD in .env, "
         "or the previous calendar month if that's also unset.",
-    )
-    parser.add_argument(
-        "--select-env",
-        action="store_true",
-        help="Always prompt for the .env file to use, ignoring any remembered .env_location.",
     )
     return parser.parse_args()
 

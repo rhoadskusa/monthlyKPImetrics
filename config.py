@@ -3,14 +3,15 @@ Configuration for the monthly KPI metrics report.
 
 The real ".env" (real credentials) is deliberately kept OUTSIDE this
 git-cloned folder -- nothing here should require dropping secrets into a
-directory that's under version control. The first time this runs, a file
-picker prompts you to select your .env file from wherever you keep it; the
-chosen path is then remembered in ".env_location" (gitignored, just a text
-file containing a path, no secrets) so you aren't asked again on future
-runs. Run with --select-env to always be prompted (e.g. if you switch
-between multiple .env files), or set KPI_ENV_FILE to skip the prompt
-entirely and point straight at a specific file. See ".env.example" for the
-full list of required keys.
+directory that's under version control. By default, every run opens a
+file picker so you can select that .env file, and nothing is written to
+disk about the choice. Set REMEMBER_ENV_FILE = 1 at the top of main.py if
+you'd rather pick it once and have it saved to ".env_location" (gitignored,
+just a text file containing a path, no secrets) for future runs to reuse
+automatically. KPI_ENV_FILE can also be set as an environment variable to
+skip the prompt entirely and point straight at a specific file (e.g. for
+an unattended/scheduled run). See ".env.example" for the full list of
+required keys.
 
 Nothing in this file should ever print or log a secret value -- only whether
 it was found.
@@ -64,18 +65,19 @@ def _resolve_env_path() -> Path:
             sys.exit(f"KPI_ENV_FILE is set but points to a file that doesn't exist: {path}")
         return path
 
-    # Set by main.py when run with --select-env: skip the remembered
-    # .env_location and always show the picker.
-    force_prompt = os.environ.get("KPI_FORCE_ENV_PROMPT", "").strip().lower() in ("1", "true", "yes")
+    # Set by main.py from its REMEMBER_ENV_FILE toggle. Default (0/unset)
+    # means: never read or write .env_location, always prompt.
+    remember = os.environ.get("KPI_REMEMBER_ENV", "0").strip() == "1"
 
-    if not force_prompt and ENV_LOCATION_POINTER.exists():
+    if remember and ENV_LOCATION_POINTER.exists():
         remembered = Path(ENV_LOCATION_POINTER.read_text(encoding="utf-8").strip())
         if remembered.is_file():
             return remembered
         print(f"Previously selected .env file is missing ({remembered}) -- please pick it again.")
 
     selected = _prompt_for_env_file()
-    ENV_LOCATION_POINTER.write_text(str(selected), encoding="utf-8")
+    if remember:
+        ENV_LOCATION_POINTER.write_text(str(selected), encoding="utf-8")
     return selected
 
 
@@ -88,8 +90,7 @@ def _require_env(key: str) -> str:
     if not value:
         sys.exit(
             f"Missing required setting '{key}'.\n"
-            f"Add it to your .env file ({ENV_PATH}) -- see .env.example for the full list. "
-            f"Delete {ENV_LOCATION_POINTER.name} if you need to pick a different .env file."
+            f"Add it to your .env file ({ENV_PATH}) -- see .env.example for the full list."
         )
     return value
 
