@@ -1,10 +1,14 @@
 """
 Configuration for the monthly KPI metrics report.
 
-Loads secrets and paths from a ".env" file located next to this script (never
-from the current working directory, so the report behaves the same no matter
-where it's launched from). See ".env.example" for the full list of required
-keys and what they mean.
+The real ".env" (real credentials) is deliberately kept OUTSIDE this
+git-cloned folder -- nothing here should require dropping secrets into a
+directory that's under version control. The first time this runs, a file
+picker prompts you to select your .env file from wherever you keep it; the
+chosen path is then remembered in ".env_location" (gitignored, just a text
+file containing a path, no secrets) so you aren't asked again on future
+runs. Delete ".env_location" (or set KPI_ENV_FILE) to point at a different
+.env file. See ".env.example" for the full list of required keys.
 
 Nothing in this file should ever print or log a secret value -- only whether
 it was found.
@@ -21,7 +25,56 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-load_dotenv(SCRIPT_DIR / ".env")
+ENV_LOCATION_POINTER = SCRIPT_DIR / ".env_location"
+
+
+def _prompt_for_env_file() -> Path:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askopenfilename(
+            title="Select your .env file (SQL Server / AirTable / folder settings)",
+            filetypes=[("Env files", "*.env"), ("All files", "*.*")],
+        )
+        root.destroy()
+    except Exception:
+        sys.exit(
+            "No .env file found, and a file picker isn't available in this environment "
+            "(no display, or tkinter isn't installed).\n"
+            "Either run this somewhere a picker can show, or set the KPI_ENV_FILE "
+            "environment variable to the full path of your .env file before running."
+        )
+
+    if not selected:
+        sys.exit("No .env file selected -- cannot continue without credentials.")
+    return Path(selected)
+
+
+def _resolve_env_path() -> Path:
+    env_override = os.environ.get("KPI_ENV_FILE", "").strip()
+    if env_override:
+        path = Path(env_override)
+        if not path.is_file():
+            sys.exit(f"KPI_ENV_FILE is set but points to a file that doesn't exist: {path}")
+        return path
+
+    if ENV_LOCATION_POINTER.exists():
+        remembered = Path(ENV_LOCATION_POINTER.read_text(encoding="utf-8").strip())
+        if remembered.is_file():
+            return remembered
+        print(f"Previously selected .env file is missing ({remembered}) -- please pick it again.")
+
+    selected = _prompt_for_env_file()
+    ENV_LOCATION_POINTER.write_text(str(selected), encoding="utf-8")
+    return selected
+
+
+ENV_PATH = _resolve_env_path()
+load_dotenv(ENV_PATH)
 
 
 def _require_env(key: str) -> str:
@@ -29,8 +82,8 @@ def _require_env(key: str) -> str:
     if not value:
         sys.exit(
             f"Missing required setting '{key}'.\n"
-            f"Add it to a \".env\" file at {SCRIPT_DIR / '.env'} "
-            f"(see .env.example for the full list)."
+            f"Add it to your .env file ({ENV_PATH}) -- see .env.example for the full list. "
+            f"Delete {ENV_LOCATION_POINTER.name} if you need to pick a different .env file."
         )
     return value
 

@@ -11,10 +11,15 @@ Requirements:
     pip install -r requirements.txt
 
 Setup:
-    1. Copy .env.example to .env (same folder as this script).
-    2. Fill in real SQL Server / AirTable credentials and the local
-       OneDrive-synced work order folder path. NEVER commit .env or paste
-       its contents anywhere -- it's gitignored on purpose.
+    1. Copy .env.example to a .env file kept OUTSIDE this cloned folder
+       (e.g. in your Documents or OneDrive) and fill in real SQL Server /
+       AirTable credentials and the local OneDrive-synced work order
+       folder path. NEVER commit .env or paste its contents anywhere.
+    2. The first time you run this, a file picker opens asking you to
+       select that .env file. The chosen path is remembered in
+       ".env_location" (gitignored) so you won't be asked again. To pick
+       a different .env later, delete ".env_location" or set the
+       KPI_ENV_FILE environment variable to the file's path.
 
 Usage:
     python main.py                  # reports on the previous calendar month
