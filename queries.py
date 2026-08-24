@@ -2,22 +2,14 @@
 Parameterized SQL against the ParentCO Yardi-backed database.
 
 *** OPEN ITEM ***
-The exact column names for transaction amount and property code in
-uvwGL_PMTrans, and for amount/period/property in PM_Budgets, were not
-confirmed at build time (the reference schema doc didn't cover them). The
-constants below are best-guess placeholders based on the Yardi/ParentCO
-naming convention (gpt_* / pmb_* prefixes) documented for the columns we DO
-know. Before running this against the real database:
+PM_Budgets column names for amount/period/property are still unconfirmed --
+the constants below (BUDGET_*) are best-guess placeholders. Before relying
+on budget figures, run:
+    SELECT TOP 5 * FROM PM_Budgets WHERE pmb_type = 'BUD'
+and fix BUDGET_AMOUNT_COL / BUDGET_DATE_COL / BUDGET_PROPCODE_COL to match.
 
-  1. Run, e.g.:
-       SELECT TOP 5 * FROM uvwGL_PMTrans
-       SELECT TOP 5 * FROM PM_Budgets WHERE pmb_type = 'BUD'
-  2. Fix the *_AMOUNT_COL / *_PROPCODE_COL / *_PERIOD_COL constants below to
-     match the real column names.
-
-All queries filter on gpt_fdate + gpt_acctid (or the budget equivalents)
-first, per the parentco-reference guidance, since uvwGL_PMTrans has ~11.9M
-rows.
+Everything else here (uvwGL_PMTrialBals, PM_Units, PM_UnitAvailability) uses
+confirmed real column names.
 """
 
 from __future__ import annotations
@@ -29,12 +21,13 @@ from sqlalchemy.engine import Engine
 
 from data_loader import run_query
 
-# --- uvwGL_PMTrans (GL transactions) ---
-GLTRANS_TABLE = "uvwGL_PMTrans"
-GLTRANS_DATE_COL = "gpt_fdate"
-GLTRANS_ACCTID_COL = "gpt_acctid"
-GLTRANS_AMOUNT_COL = "gpt_amount"  # TODO: confirm real column name
-GLTRANS_PROPCODE_COL = "gpt_propertycode"  # TODO: confirm real column name
+# --- uvwGL_PMTrialBals (monthly trial balance -- use this, NOT uvwGL_PMTrans,
+# which is still being updated/unreliable per the user) ---
+TRIALBAL_TABLE = "uvwGL_PMTrialBals"
+TRIALBAL_DATE_COL = "pmtb_fdate"
+TRIALBAL_ACCTID_COL = "pmtb_acctid"
+TRIALBAL_ACTIVITY_COL = "pmtb_activityamt"
+TRIALBAL_PROPCODE_COL = "pmtb_propertycode"
 
 # --- PM_Budgets ---
 BUDGET_TABLE = "PM_Budgets"
@@ -47,41 +40,94 @@ BUDGET_PROPCODE_COL = "pmb_propertycode"  # TODO: confirm real column name
 # --- PM_Units ---
 UNITS_TABLE = "PM_Units"
 
+# --- PM_UnitAvailability (per-property, per-as-of-date occupancy snapshot) ---
+AVAILABILITY_TABLE = "PM_UnitAvailability"
+AVAILABILITY_PROPCODE_COL = "pua_propcode"
+AVAILABILITY_DATE_COL = "pua_asOfDate"
 
-def gl_actuals_by_property(
+
+def _placeholders(prefix: str, values: list) -> tuple[str, dict]:
+    names = [f"{prefix}{i}" for i in range(len(values))]
+    sql = ", ".join(f":{n}" for n in names)
+    params = {n: v for n, v in zip(names, values)}
+    return sql, params
+
+
+def trial_bal_property_totals(
+    engine: Engine,
+    acct_ids: list[int],
+    start_date: date,
+    end_date: date,
+    property_codes: list[str] | None = None,
+    credit: bool = False,
+) -> pd.DataFrame:
+    """Sum trial balance activity for the given accounts and date range.
+
+    Returns one row per (TRIMmed) property code with a `total` column.
+
+    `credit=True` negates the sum -- Yardi stores credit-normal accounts
+    (revenue) as negative in pmtb_activityamt, so revenue/income account
+    groups need `credit=True` to come out positive. Debit-normal accounts
+    (all expense/CapEx groups) should use the default `credit=False`.
+    """
+    acct_sql, acct_params = _placeholders("acct", acct_ids)
+    params = {**acct_params, "start_date": start_date, "end_date": end_date}
+
+    property_filter = ""
+    if property_codes:
+        prop_sql, prop_params = _placeholders("prop", property_codes)
+        params.update(prop_params)
+        property_filter = f"AND TRIM({TRIALBAL_PROPCODE_COL}) IN ({prop_sql})"
+
+    sign = "-1 *" if credit else ""
+    sql = f"""
+        SELECT
+            TRIM({TRIALBAL_PROPCODE_COL}) AS property_code,
+            SUM({sign} {TRIALBAL_ACTIVITY_COL}) AS total
+        FROM {TRIALBAL_TABLE}
+        WHERE {TRIALBAL_DATE_COL} >= :start_date
+          AND {TRIALBAL_DATE_COL} < :end_date
+          AND {TRIALBAL_ACCTID_COL} IN ({acct_sql})
+          {property_filter}
+        GROUP BY TRIM({TRIALBAL_PROPCODE_COL})
+    """
+    return run_query(engine, sql, params)
+
+
+def trial_bal_account_totals(
     engine: Engine,
     acct_ids: list[int],
     start_date: date,
     end_date: date,
     property_codes: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Sum GL transaction amounts for the given accounts and date range.
+    """Sum trial balance activity for the given accounts and date range,
+    grouped by account instead of property. Returns raw (un-negated)
+    totals -- the caller applies the credit/debit sign convention.
 
-    Returns one row per property code (TRIMmed) with a `total` column, so
-    portfolio scoping (AirTable active-property list) can be applied in
-    Python after the fact.
+    Used for Economic Occupancy, which needs each account's contribution
+    broken out (Gross Potential Rent, Vacancy Loss, Concessions, etc.)
+    rather than a single combined sum.
     """
-    acct_placeholders = ", ".join(f":acct{i}" for i in range(len(acct_ids)))
-    params = {f"acct{i}": acct_id for i, acct_id in enumerate(acct_ids)}
-    params["start_date"] = start_date
-    params["end_date"] = end_date
+    acct_sql, acct_params = _placeholders("acct", acct_ids)
+    params = {**acct_params, "start_date": start_date, "end_date": end_date}
 
     property_filter = ""
     if property_codes:
-        prop_placeholders = ", ".join(f":prop{i}" for i in range(len(property_codes)))
-        params.update({f"prop{i}": code for i, code in enumerate(property_codes)})
-        property_filter = f"AND TRIM({GLTRANS_PROPCODE_COL}) IN ({prop_placeholders})"
+        prop_sql, prop_params = _placeholders("prop", property_codes)
+        params.update(prop_params)
+        property_filter = f"AND TRIM({TRIALBAL_PROPCODE_COL}) IN ({prop_sql})"
 
     sql = f"""
         SELECT
-            TRIM({GLTRANS_PROPCODE_COL}) AS property_code,
-            SUM({GLTRANS_AMOUNT_COL}) AS total
-        FROM {GLTRANS_TABLE}
-        WHERE {GLTRANS_DATE_COL} >= :start_date
-          AND {GLTRANS_DATE_COL} < :end_date
-          AND {GLTRANS_ACCTID_COL} IN ({acct_placeholders})
+            {TRIALBAL_ACCTID_COL} AS acct_id,
+            SUM({TRIALBAL_ACTIVITY_COL}) AS total
+        FROM {TRIALBAL_TABLE}
+        WHERE {TRIALBAL_DATE_COL} >= :start_date
+          AND {TRIALBAL_DATE_COL} < :end_date
+          AND {TRIALBAL_ACCTID_COL} IN ({acct_sql})
           {property_filter}
-        GROUP BY TRIM({GLTRANS_PROPCODE_COL})
+        GROUP BY {TRIALBAL_ACCTID_COL}
     """
     return run_query(engine, sql, params)
 
@@ -93,15 +139,14 @@ def budget_by_property(
     property_codes: list[str] | None = None,
 ) -> pd.DataFrame:
     """Sum budgeted amounts for the given accounts and month."""
-    acct_placeholders = ", ".join(f":acct{i}" for i in range(len(acct_ids)))
-    params = {f"acct{i}": acct_id for i, acct_id in enumerate(acct_ids)}
-    params["period_start"] = period_start
+    acct_sql, acct_params = _placeholders("acct", acct_ids)
+    params = {**acct_params, "period_start": period_start}
 
     property_filter = ""
     if property_codes:
-        prop_placeholders = ", ".join(f":prop{i}" for i in range(len(property_codes)))
-        params.update({f"prop{i}": code for i, code in enumerate(property_codes)})
-        property_filter = f"AND TRIM({BUDGET_PROPCODE_COL}) IN ({prop_placeholders})"
+        prop_sql, prop_params = _placeholders("prop", property_codes)
+        params.update(prop_params)
+        property_filter = f"AND TRIM({BUDGET_PROPCODE_COL}) IN ({prop_sql})"
 
     sql = f"""
         SELECT
@@ -110,23 +155,23 @@ def budget_by_property(
         FROM {BUDGET_TABLE}
         WHERE {BUDGET_TYPE_COL} = 'BUD'
           AND {BUDGET_DATE_COL} = :period_start
-          AND {BUDGET_ACCTID_COL} IN ({acct_placeholders})
+          AND {BUDGET_ACCTID_COL} IN ({acct_sql})
           {property_filter}
     """
     return run_query(engine, sql, params)
 
 
 def unit_inventory(engine: Engine, property_codes: list[str] | None = None) -> pd.DataFrame:
-    """Pull unit-level inventory (bedrooms, status, rent, move dates).
+    """Pull unit-level inventory (bedrooms, rent, move dates).
 
     Excludes units flagged unit_excluded = 1. Drops etl_* pipeline columns.
     """
     params: dict = {}
     property_filter = ""
     if property_codes:
-        prop_placeholders = ", ".join(f":prop{i}" for i in range(len(property_codes)))
-        params.update({f"prop{i}": code for i, code in enumerate(property_codes)})
-        property_filter = f"AND TRIM(unit_propcode) IN ({prop_placeholders})"
+        prop_sql, prop_params = _placeholders("prop", property_codes)
+        params.update(prop_params)
+        property_filter = f"AND TRIM(unit_propcode) IN ({prop_sql})"
 
     sql = f"""
         SELECT
@@ -143,6 +188,39 @@ def unit_inventory(engine: Engine, property_codes: list[str] | None = None) -> p
             unit_moveoutdate
         FROM {UNITS_TABLE}
         WHERE (unit_excluded IS NULL OR unit_excluded = 0)
+          {property_filter}
+    """
+    return run_query(engine, sql, params)
+
+
+def unit_availability_window(
+    engine: Engine,
+    window_start: date,
+    window_end: date,
+    property_codes: list[str] | None = None,
+) -> pd.DataFrame:
+    """Pull all PM_UnitAvailability rows within a date window.
+
+    Used by calculations.nearest_availability_snapshot() to find the
+    closest as-of-date to a target end-of-month when the EOM date itself
+    isn't present (entries can land +/- a couple of days off EOM).
+    """
+    params: dict = {"window_start": window_start, "window_end": window_end}
+    property_filter = ""
+    if property_codes:
+        prop_sql, prop_params = _placeholders("prop", property_codes)
+        params.update(prop_params)
+        property_filter = f"AND TRIM({AVAILABILITY_PROPCODE_COL}) IN ({prop_sql})"
+
+    sql = f"""
+        SELECT
+            TRIM({AVAILABILITY_PROPCODE_COL}) AS property_code,
+            {AVAILABILITY_DATE_COL} AS as_of_date,
+            pua_units,
+            pua_pctocc,
+            pua_avgrent
+        FROM {AVAILABILITY_TABLE}
+        WHERE {AVAILABILITY_DATE_COL} BETWEEN :window_start AND :window_end
           {property_filter}
     """
     return run_query(engine, sql, params)

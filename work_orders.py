@@ -11,11 +11,11 @@ These are NOT flat CSVs -- they're grouped Excel reports:
     - a subtotal row "Total ( N )"
   Final row: "Grand Total( N )"
 
-*** OPEN ITEM ***
-Only a small sample (63 rows) was available when this was built. The full
-set of Status values, and which ones should count as "closed" beyond
-"Work Completed", should be confirmed once the full historical export
-(back to 1/1/2025) is available.
+Confirmed full Status value set: Call, Canceled, In Progress, On Hold,
+Request Reassignment, Scheduled, Vendor Schedule, Web, Work Completed.
+Only "Work Completed" counts as closed for Closed Tickets / Avg Days to
+Close -- every other status is either still open or terminated without
+completed work (Canceled).
 """
 
 from __future__ import annotations

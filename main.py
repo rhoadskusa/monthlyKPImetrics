@@ -110,8 +110,8 @@ def main() -> None:
         calculate_capex(engine, active_property_codes, bedrooms, periods),
         calculate_opex_ratio(engine, active_property_codes, periods),
         calculate_mr(engine, active_property_codes, bedrooms, periods),
-        calculate_physical_occupancy(units_df, periods),
-        calculate_economic_occupancy(engine, units_df, active_property_codes, periods),
+        calculate_physical_occupancy(engine, active_property_codes, periods),
+        calculate_economic_occupancy(engine, active_property_codes, periods),
     ]
 
     log.info("Loading work order exports from %s...", config.WORK_ORDER_DIR)

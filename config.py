@@ -163,3 +163,19 @@ CAPEX_ACCOUNTS = [
 # Cash Flow (NOI - CapEx - Debt Service) is intentionally not implemented yet
 # -- the user is still finalizing the debt-service treatment. See
 # calculations.calculate_cash_flow_stub().
+
+# Economic Occupancy accounts (ported from the user's Power Query M code).
+# All are credit-normal (subset of TOTAL_RENTAL_INCOME) -- negate when summing.
+GROSS_POTENTIAL_RENT_ACCOUNT = 4011003
+ECONOMIC_OCCUPANCY_ACCOUNTS = [
+    4011003,  # Gross Potential Rent
+    4015000,  # Gain/Loss to Lease
+    4016000,  # Vacancy Loss
+    4017001,  # Model Units
+    4018000,  # Resident Concessions
+    4018004,  # Recurring Concessions
+]
+
+# Physical occupancy EOM-snapshot lookup tolerance: PM_UnitAvailability
+# entries can land a couple of days off the true end-of-month date.
+UNIT_AVAILABILITY_DATE_TOLERANCE_DAYS = 5
