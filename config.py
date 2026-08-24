@@ -102,6 +102,12 @@ def _optional_env(key: str, default: str = "") -> str:
 # --- SQL Server ---
 DB_SERVER = _require_env("DB_SERVER")
 DB_NAME = _require_env("DB_NAME")
+# The exact name of the ODBC driver installed on this machine (as it
+# appears in "ODBC Data Sources" on Windows), without surrounding braces --
+# those get added when building the connection string. Common values:
+# "ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server", or the
+# older driver that ships with Windows, "SQL Server".
+DB_DRIVER = _optional_env("DB_DRIVER", "ODBC Driver 18 for SQL Server")
 DB_TRUSTED_CONNECTION = _optional_env("DB_TRUSTED_CONNECTION", "no").lower() in (
     "yes",
     "true",
