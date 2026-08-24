@@ -160,6 +160,7 @@ def budget_by_property(
           AND {BUDGET_YEAR_COL} = :year
           AND REPLACE({BUDGET_ACCTNUM_COL}, '-', '') IN ({acct_sql})
           {property_filter}
+        GROUP BY TRIM({BUDGET_PROPCODE_COL})
     """
     return run_query(engine, sql, params)
 
