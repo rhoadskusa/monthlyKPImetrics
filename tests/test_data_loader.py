@@ -9,6 +9,7 @@ Run with: python -m unittest discover tests
 from __future__ import annotations
 
 import unittest
+from datetime import date as _date
 from unittest.mock import MagicMock, patch
 from urllib.parse import unquote_plus
 
@@ -126,6 +127,39 @@ class RunQueryTests(unittest.TestCase):
 
         sql_arg = mock_read_sql.call_args.args[0]
         self.assertIsInstance(sql_arg, TextClause)
+
+    def test_date_params_are_stringified_before_binding(self):
+        # Regression test: some ODBC drivers can't bind native date
+        # objects at all (HYC00 / SQLBindParameter "Optional feature not
+        # implemented"). Sending an ISO string instead sidesteps that.
+        with patch("data_loader.pd.read_sql") as mock_read_sql:
+            mock_read_sql.return_value = __import__("pandas").DataFrame()
+            data_loader.run_query(
+                MagicMock(),
+                "SELECT * FROM t WHERE d >= :start",
+                {"start": _date(2026, 7, 1), "prop": "100"},
+            )
+
+        bound_params = mock_read_sql.call_args.kwargs["params"]
+        self.assertEqual(bound_params["start"], "2026-07-01")
+        self.assertIsInstance(bound_params["start"], str)
+        self.assertEqual(bound_params["prop"], "100")
+
+    def test_bind_parameter_error_exits_with_driver_upgrade_message(self):
+        class FakeBindParamError(Exception):
+            def __str__(self):
+                return (
+                    "('HYC00', '[HYC00] [Microsoft][ODBC SQL Server Driver]Optional feature "
+                    "not implemented (0) (SQLBindParameter)')"
+                )
+
+        with patch("data_loader.pd.read_sql", side_effect=DBAPIError("stmt", {}, FakeBindParamError())):
+            with self.assertRaises(SystemExit) as ctx:
+                data_loader.run_query(MagicMock(), "SELECT 1")
+
+        message = str(ctx.exception.code)
+        self.assertIn("DB_DRIVER", message)
+        self.assertIn("SQLBindParameter", message)
 
 
 class ConnectionStringTests(unittest.TestCase):

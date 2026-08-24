@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import date
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -113,6 +114,19 @@ def get_engine() -> Engine:
     return engine
 
 
+def _stringify_dates(params: dict) -> dict:
+    """Convert date/datetime params to ISO strings before binding.
+
+    Some ODBC drivers (notably older ones) fail to bind native Python
+    date objects at all -- pyodbc raises "HYC00: Optional feature not
+    implemented (SQLBindParameter)". SQL Server compares an ISO-format
+    string ("YYYY-MM-DD") against a date column just fine via implicit
+    conversion, and every driver can bind a plain string, so sending dates
+    this way sidesteps the driver limitation entirely.
+    """
+    return {k: (v.isoformat() if isinstance(v, date) else v) for k, v in params.items()}
+
+
 def run_query(engine: Engine, sql: str, params: dict | None = None) -> pd.DataFrame:
     """Run a parameterized query and return the result as a DataFrame.
 
@@ -123,6 +137,23 @@ def run_query(engine: Engine, sql: str, params: dict | None = None) -> pd.DataFr
     -- it's treated as literal text, and pyodbc fails with "The SQL
     contains 0 parameter markers, but N parameters were supplied".
     """
-    df = pd.read_sql(text(sql), engine, params=params or {})
+    bound_params = _stringify_dates(params) if params else {}
+
+    try:
+        df = pd.read_sql(text(sql), engine, params=bound_params)
+    except DBAPIError as exc:
+        message = str(exc.orig) if exc.orig else str(exc)
+        lower_message = message.lower()
+        if "hyc00" in lower_message or "sqlbindparameter" in lower_message:
+            sys.exit(
+                "The ODBC driver rejected one of the query parameters "
+                "(\"Optional feature not implemented\" / SQLBindParameter).\n"
+                "This usually means the installed driver can't bind a particular parameter "
+                "type. Try installing \"ODBC Driver 18 for SQL Server\" from Microsoft and "
+                "setting DB_DRIVER to match -- it has broader parameter-type support than "
+                "older drivers."
+            )
+        raise
+
     log.info("Query returned %d rows", len(df))
     return df
