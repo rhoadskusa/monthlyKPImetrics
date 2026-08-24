@@ -1,6 +1,7 @@
 """
-Unit tests for data_loader.get_engine(): connection-string construction and
-the driver-not-found / SSL-handshake error handling.
+Unit tests for data_loader.get_engine() (connection-string construction and
+the driver-not-found / SSL-handshake error handling) and run_query() (named
+bind parameters actually get translated for the driver).
 
 Run with: python -m unittest discover tests
 """
@@ -11,6 +12,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from urllib.parse import unquote_plus
 
+from sqlalchemy import TextClause
 from sqlalchemy.exc import DBAPIError
 
 import config
@@ -108,6 +110,22 @@ class GetEngineDriverErrorTests(unittest.TestCase):
             result = data_loader.get_engine()
 
         self.assertIs(result, fake_engine)
+
+
+class RunQueryTests(unittest.TestCase):
+    def test_wraps_sql_in_text_for_named_bind_params(self):
+        # Regression test: passing a raw string (not wrapped in text())
+        # to pd.read_sql sends it straight to the DBAPI via
+        # exec_driver_sql, which doesn't translate ":paramname" bind
+        # markers at all -- pyodbc then fails with "The SQL contains 0
+        # parameter markers, but N parameters were supplied" even though
+        # the params dict and the query looked correct.
+        with patch("data_loader.pd.read_sql") as mock_read_sql:
+            mock_read_sql.return_value = __import__("pandas").DataFrame()
+            data_loader.run_query(MagicMock(), "SELECT * FROM t WHERE x IN (:a, :b)", {"a": 1, "b": 2})
+
+        sql_arg = mock_read_sql.call_args.args[0]
+        self.assertIsInstance(sql_arg, TextClause)
 
 
 class ConnectionStringTests(unittest.TestCase):

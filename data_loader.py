@@ -12,7 +12,7 @@ import sys
 from urllib.parse import quote_plus
 
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
 
@@ -114,7 +114,15 @@ def get_engine() -> Engine:
 
 
 def run_query(engine: Engine, sql: str, params: dict | None = None) -> pd.DataFrame:
-    """Run a parameterized query and return the result as a DataFrame."""
-    df = pd.read_sql(sql, engine, params=params or {})
+    """Run a parameterized query and return the result as a DataFrame.
+
+    Wraps `sql` in SQLAlchemy's text() so our named ":paramname" bind
+    markers actually get translated to the driver's native parameter
+    style. Without text(), pandas/SQLAlchemy send the raw SQL straight to
+    pyodbc (exec_driver_sql), which doesn't understand ":paramname" at all
+    -- it's treated as literal text, and pyodbc fails with "The SQL
+    contains 0 parameter markers, but N parameters were supplied".
+    """
+    df = pd.read_sql(text(sql), engine, params=params or {})
     log.info("Query returned %d rows", len(df))
     return df
