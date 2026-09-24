@@ -1,0 +1,1003 @@
+POWER BI / DAX SKILL REFERENCE
+Knowledge file for the Power BI & DAX Copilot agent.
+Plain text. Section numbers are stable so the instructions can refer to them.
+
+Naming used in the examples (replace with the user's real names):
+  Fact tables:      Sales, Budget, Inventory, Orders
+  Dimensions:       'Date', 'Product', 'Customer', 'Store', 'Security'
+  Base measures:    [Sales] = SUM ( Sales[Amount] ), [Quantity], [Budget Amount]
+
+======================================================================
+SECTION 1 - HOW TO USE THIS DOCUMENT
+======================================================================
+ 1  How to use this document
+ 2  Evaluation context primer
+ 3  Modeling standards
+ 4  Naming, formatting, and documentation conventions
+ 5  DAX pattern library
+ 6  Newer features (check version and license before recommending)
+ 7  Anti-patterns and replacements
+ 8  DAX debugging checklist and test harness
+ 9  Performance playbook
+10  Power Query / M playbook
+11  Security (RLS / OLS)
+12  Service, refresh, and deployment
+13  Requesting evidence from users
+14  Glossary
+
+Rules for using the patterns:
+- Adapt every pattern to the user's actual names, grain, and relationships.
+- Say which assumptions a pattern makes, for example "assumes 'Date' is marked
+  as a date table and related to Sales[Order Date]".
+- Test every pattern using section 8 before calling it done.
+
+======================================================================
+SECTION 2 - EVALUATION CONTEXT PRIMER
+======================================================================
+FILTER CONTEXT
+  The set of filters in effect when a measure is evaluated. It comes from visual
+  rows/columns, slicers, page/report filters, RLS, and CALCULATE modifiers.
+  Filters move from the "one" side to the "many" side of a relationship
+  (and both ways only on bidirectional relationships).
+
+ROW CONTEXT
+  The "current row" during iteration: calculated columns, and iterators
+  such as SUMX, FILTER, ADDCOLUMNS, and RANKX. Row context by itself does NOT
+  filter related tables or measures.
+
+CONTEXT TRANSITION
+  CALCULATE (and every measure reference, which gets an implicit CALCULATE)
+  turns the current row context into an equivalent filter context.
+  Consequences:
+  - A measure used in a calculated column or iterator is filtered by the row.
+  - Iterating a table that has duplicate rows can double count.
+  - Context transition inside large iterators is expensive.
+
+CALCULATE EVALUATION ORDER (simplified)
+  1. Filter arguments are evaluated in the ORIGINAL filter context.
+  2. Context transition happens if there is a row context.
+  3. Modifiers apply (REMOVEFILTERS/ALL*, USERELATIONSHIP, CROSSFILTER).
+  4. Filter arguments are applied. They OVERWRITE existing filters on the same
+     columns unless wrapped in KEEPFILTERS.
+  5. The expression is evaluated in the new context.
+
+CALCULATE MODIFIERS - QUICK TABLE
+  REMOVEFILTERS(T or T[c])  Clears filters. Cannot be used as a table expression.
+  ALL(T or T[c])            Clears filters, OR returns all rows as a table.
+  ALLEXCEPT(T, T[c1],...)   Clears every filter on T except the listed columns.
+                            Only keeps filters that are on those exact columns.
+  ALLSELECTED(...)          Restores the filters coming from outside the visual
+                            (slicers, filters). Used for "% of visible total".
+                            Hard to reason about inside iterators.
+  ALLNOBLANKROW(...)        Like ALL but ignores the blank row created by an
+                            invalid relationship.
+  KEEPFILTERS(filter)       Intersects the new filter with the existing one
+                            instead of replacing it.
+  USERELATIONSHIP(a, b)     Activates an inactive relationship for this
+                            calculation only.
+  CROSSFILTER(a, b, dir)    Changes filter direction for this calculation only
+                            (BOTH, ONEWAY, NONE). Prefer this to a model-wide
+                            bidirectional relationship.
+  TREATAS(table, cols)      Applies values as a filter on columns that are not
+                            related (virtual relationship).
+
+BOOLEAN FILTER SHORTHAND
+  CALCULATE ( [Sales], 'Product'[Color] = "Red" )
+  is equivalent to
+  CALCULATE ( [Sales], FILTER ( ALL ( 'Product'[Color] ), 'Product'[Color] = "Red" ) )
+  so it REPLACES any existing filter on 'Product'[Color]. Use
+  KEEPFILTERS ( 'Product'[Color] = "Red" ) to intersect with it instead.
+
+WHY TOTALS DIFFER FROM THE SUM OF ROWS
+  The total row is evaluated once, with the row-level filter removed. It is not
+  computed by adding up the visible rows. Non-additive measures (ratios,
+  distinct counts, MAX, IF logic, thresholds) will not sum. This is correct
+  behavior. If the business wants the sum of rows, use the pattern in section 5.20.
+
+======================================================================
+SECTION 3 - MODELING STANDARDS
+======================================================================
+STAR SCHEMA
+- Facts hold numeric events at one declared grain, for example "one row per
+  order line". Dimensions hold descriptive attributes and have one row per key.
+- Relationships: dimension (1) -> fact (*), single direction, integer keys
+  where possible.
+- Flatten snowflakes (Product -> Subcategory -> Category) into a single
+  dimension unless the size or reuse clearly justifies keeping them separate.
+- Do not relate one fact directly to another fact. Use shared (conformed)
+  dimensions.
+- Many-to-many between dimensions: use a bridge table and bidirectional
+  filtering only on the bridge -> dimension relationship, or use CROSSFILTER in
+  the specific measures that need it.
+- Different grains (for example Budget by month and category, Sales by day and
+  product): relate Budget to month- or category-level attributes, or use
+  TREATAS (section 5.14). Do not force a daily grain on the budget.
+
+DATE TABLE REQUIREMENTS
+- A dedicated table with one row per day, no gaps, covering full years
+  (1 Jan to 31 Dec, or the full fiscal years).
+- Marked as a date table on a column of Date data type.
+- Turn off Auto date/time in Options (Current file > Data load). It creates a
+  hidden table for every date column and makes the model larger.
+- Typical columns: Date, Year, Quarter, Month Number, Month Name (sort by Month
+  Number), Year Month (sort by Year Month Number), Year Month Number
+  (Year*12+Month or YYYYMM), Week, Day of Week (sort by number), Is Working Day,
+  Fiscal Year, Fiscal Quarter, Fiscal Month, Fiscal Day Of Year,
+  Fiscal Year Number, Relative offsets (e.g., Month Offset = 0 for the current month).
+- Role-playing dates (Order Date, Ship Date, Due Date): keep one active
+  relationship and activate the others with USERELATIONSHIP in measures. Use a
+  second copy of the date table only when users must slice by two dates at once.
+
+RELATIONSHIP RULES
+- Check that the "one" side key is unique and not blank. Duplicate keys block
+  the relationship or create a many-to-many relationship.
+- Fact keys missing from the dimension create the blank (unknown) row. Fix this
+  in the source or add an "Unknown" member.
+- Avoid ambiguous paths: two active routes between the same tables. Power BI
+  will make one of them inactive or refuse the relationship.
+- Bidirectional filtering is a targeted tool, not a default. It can create
+  ambiguity, slow queries down, and change how RLS behaves.
+
+MODEL HYGIENE
+- Hide key columns and technical columns. Expose measures, not raw numeric columns.
+- Use sort-by columns for month and weekday names.
+- Set data types correctly (integer vs decimal vs fixed decimal; Date vs DateTime).
+- Remove unused columns, especially high-cardinality ones (GUIDs, timestamps,
+  free text, transaction IDs that nobody reports on).
+- Prefer computing attributes upstream (source or Power Query) over DAX
+  calculated columns ("as far upstream as possible, as far downstream as necessary").
+
+======================================================================
+SECTION 4 - NAMING, FORMATTING, AND DOCUMENTATION CONVENTIONS
+======================================================================
+MEASURES
+- Use business-friendly names with spaces: [Sales], [Sales PY], [Sales YoY %],
+  [Gross Margin %], [Customers (Distinct)].
+- Suffixes: PY, YTD, QTD, MTD, R12M (rolling 12 months), YoY, YoY %, Var, Var %.
+- Keep them in a dedicated measure table ("_Measures") and organize them in
+  display folders such as "Sales\Time Intelligence".
+- Fill in the Description property. It appears as a tooltip in the field list
+  and in Copilot.
+- Set format strings on every measure. Do not format by wrapping it in FORMAT(),
+  because FORMAT returns text and breaks sorting and totals. Use dynamic format
+  strings when the format has to change.
+- Measure branching: build base measures first, then derive others from them.
+
+COLUMNS AND TABLES
+- Singular or plural dimension names are both fine, but be consistent.
+- Do not prefix names with "dim"/"fact" in names users see, unless that is the
+  team standard.
+- Prefix columns that only exist for sorting or joining and hide them.
+
+DAX STYLE (SQLBI style)
+- Put functions and keywords in upper case, one argument per line for
+  multi-argument calls, and 4-space indentation.
+- Put a space before an opening parenthesis in multi-line calls: CALCULATE (
+- Always reference columns with their table: 'Table'[Column].
+  Never qualify measures with a table name: [Measure].
+- Use VAR for any value used more than once or that makes the code easier to
+  read. Name variables for their meaning (CurrentDate, SalesPriorYear), not
+  x or temp.
+- Comments: -- for a single line, /* */ for a block.
+
+Example:
+    Sales YoY % =
+    VAR SalesCurrent = [Sales]
+    VAR SalesPriorYear = [Sales PY]
+    RETURN
+        IF (
+            NOT ISBLANK ( SalesCurrent ) && NOT ISBLANK ( SalesPriorYear ),
+            DIVIDE ( SalesCurrent - SalesPriorYear, SalesPriorYear )
+        )
+
+======================================================================
+SECTION 5 - DAX PATTERN LIBRARY
+======================================================================
+Every pattern assumes a marked 'Date' table related to the fact unless stated.
+
+5.1 BASE MEASURES
+    Sales = SUM ( Sales[Amount] )
+    Quantity = SUM ( Sales[Quantity] )
+    Orders = DISTINCTCOUNT ( Sales[Order Number] )
+    Customers = DISTINCTCOUNT ( Sales[Customer Key] )
+    Avg Order Value = DIVIDE ( [Sales], [Orders] )
+
+5.2 PERCENT OF GRAND TOTAL (ignores all filters on the dimension)
+    Sales % of All Products =
+    DIVIDE (
+        [Sales],
+        CALCULATE ( [Sales], REMOVEFILTERS ( 'Product' ) )
+    )
+
+5.3 PERCENT OF VISIBLE TOTAL (respects slicers, ignores the visual's rows)
+    Sales % of Selected =
+    DIVIDE (
+        [Sales],
+        CALCULATE ( [Sales], ALLSELECTED ( 'Product' ) )
+    )
+
+5.4 PERCENT OF PARENT IN A HIERARCHY
+    Sales % of Parent =
+    VAR SalesCurrent = [Sales]
+    VAR SalesParent =
+        SWITCH (
+            TRUE (),
+            ISINSCOPE ( 'Product'[Product Name] ),
+                CALCULATE ( [Sales], REMOVEFILTERS ( 'Product'[Product Name] ) ),
+            ISINSCOPE ( 'Product'[Subcategory] ),
+                CALCULATE ( [Sales], REMOVEFILTERS ( 'Product'[Subcategory] ) ),
+            ISINSCOPE ( 'Product'[Category] ),
+                CALCULATE ( [Sales], REMOVEFILTERS ( 'Product'[Category] ) )
+        )
+    RETURN
+        DIVIDE ( SalesCurrent, SalesParent )
+    Note: test the most detailed level first. ISINSCOPE is TRUE at every level
+    below the grouping level.
+
+5.5 YTD / QTD / MTD (standard calendar)
+    Sales YTD = CALCULATE ( [Sales], DATESYTD ( 'Date'[Date] ) )
+    Sales QTD = CALCULATE ( [Sales], DATESQTD ( 'Date'[Date] ) )
+    Sales MTD = CALCULATE ( [Sales], DATESMTD ( 'Date'[Date] ) )
+    Fiscal year ending 30 June:
+    Sales FYTD = CALCULATE ( [Sales], DATESYTD ( 'Date'[Date], "6-30" ) )
+
+5.6 PRIOR YEAR AND YEAR OVER YEAR
+    Sales PY = CALCULATE ( [Sales], SAMEPERIODLASTYEAR ( 'Date'[Date] ) )
+    Sales YoY = [Sales] - [Sales PY]
+    Sales YoY % = see the example in section 4.
+    Alternative: DATEADD ( 'Date'[Date], -1, YEAR ). Prior month:
+    DATEADD ( 'Date'[Date], -1, MONTH ).
+
+    Hide future dates, so the current year does not show PY values for
+    months that have not happened yet. Add this calculated column to 'Date':
+      Date With Sales =
+        'Date'[Date] <= MAX ( Sales[Order Date] )
+    Then in the PY measure:
+      Sales PY =
+      CALCULATE (
+          [Sales],
+          CALCULATETABLE (
+              SAMEPERIODLASTYEAR ( 'Date'[Date] ),
+              'Date'[Date With Sales] = TRUE
+          )
+      )
+
+5.7 ROLLING 12 MONTHS
+    Sales R12M =
+    VAR LastVisibleDate = MAX ( 'Date'[Date] )
+    RETURN
+        CALCULATE (
+            [Sales],
+            DATESINPERIOD ( 'Date'[Date], LastVisibleDate, -12, MONTH )
+        )
+    Rolling average per month: DIVIDE ( [Sales R12M], 12 ). To handle
+    history shorter than 12 months, divide by the number of months that have data.
+
+5.8 RUNNING TOTAL (cumulative over all history)
+    Sales Running Total =
+    VAR LastVisibleDate = MAX ( 'Date'[Date] )
+    RETURN
+        CALCULATE (
+            [Sales],
+            REMOVEFILTERS ( 'Date' ),
+            'Date'[Date] <= LastVisibleDate
+        )
+    Running total within the selection: replace REMOVEFILTERS ( 'Date' ) with
+    ALLSELECTED ( 'Date' ). Or use visual calculations (section 6.2).
+
+5.9 CUSTOM FISCAL CALENDAR (4-4-5, 52/53-week, or any non-standard year)
+    Built-in time intelligence functions assume a standard calendar. For custom
+    calendars, filter on the columns in the date table instead.
+    Required columns: 'Date'[Fiscal Year Number] (integer),
+    'Date'[Fiscal Day Of Year] (integer), 'Date'[Fiscal Period Number]
+    (sequential across years, for example FiscalYear*12 + Period).
+
+    Sales FYTD Custom =
+    VAR CurrentFiscalYear = MAX ( 'Date'[Fiscal Year Number] )
+    VAR LastVisibleDate = MAX ( 'Date'[Date] )
+    RETURN
+        CALCULATE (
+            [Sales],
+            REMOVEFILTERS ( 'Date' ),
+            'Date'[Fiscal Year Number] = CurrentFiscalYear,
+            'Date'[Date] <= LastVisibleDate
+        )
+
+    Sales FYTD PY Custom =
+    VAR CurrentFiscalYear = MAX ( 'Date'[Fiscal Year Number] )
+    VAR LastFiscalDay = MAX ( 'Date'[Fiscal Day Of Year] )
+    RETURN
+        CALCULATE (
+            [Sales],
+            REMOVEFILTERS ( 'Date' ),
+            'Date'[Fiscal Year Number] = CurrentFiscalYear - 1,
+            'Date'[Fiscal Day Of Year] <= LastFiscalDay
+        )
+
+    Sales Prior Period Custom =
+    VAR CurrentPeriod = MAX ( 'Date'[Fiscal Period Number] )
+    RETURN
+        CALCULATE (
+            [Sales],
+            REMOVEFILTERS ( 'Date' ),
+            'Date'[Fiscal Period Number] = CurrentPeriod - 1
+        )
+    Note: newer Power BI versions add calendar-based time intelligence, where a
+    calendar is defined on the date table (section 6.6).
+
+5.10 RANKING
+    Product Rank =
+    IF (
+        ISINSCOPE ( 'Product'[Product Name] ),
+        RANKX (
+            ALLSELECTED ( 'Product'[Product Name] ),
+            [Sales],
+            ,
+            DESC,
+            DENSE
+        )
+    )
+    Window-function alternative (supports ORDERBY on several columns for
+    tie-breaks):
+    Product Rank (RANK) =
+    IF (
+        ISINSCOPE ( 'Product'[Product Name] ),
+        RANK (
+            DENSE,
+            ALLSELECTED ( 'Product'[Product Name] ),
+            ORDERBY ( [Sales], DESC )
+        )
+    )
+    Pitfall: RANKX over ALL ( 'Product' ) iterates entire rows, so products
+    with the same name that are separate rows are ranked separately. Rank over
+    the column you display.
+
+5.11 TOP N AND "OTHERS"
+    Top N filter as a measure (N comes from a numeric-range parameter):
+    Sales Top N =
+    VAR N = [Top N Value]
+    VAR TopProducts =
+        TOPN ( N, ALLSELECTED ( 'Product'[Product Name] ), [Sales], DESC )
+    RETURN
+        CALCULATE ( [Sales], KEEPFILTERS ( TopProducts ) )
+
+    Top N + Others needs a disconnected axis table (calculated table):
+    Product Axis =
+    UNION (
+        SELECTCOLUMNS ( DISTINCT ( 'Product'[Product Name] ), "Product", 'Product'[Product Name] ),
+        ROW ( "Product", "Others" )
+    )
+    Sales Top N + Others =
+    VAR N = [Top N Value]
+    VAR AxisItem = SELECTEDVALUE ( 'Product Axis'[Product] )
+    VAR TopProducts =
+        TOPN ( N, ALLSELECTED ( 'Product'[Product Name] ), [Sales], DESC )
+    VAR SalesOthers =
+        CALCULATE (
+            [Sales],
+            EXCEPT ( ALLSELECTED ( 'Product'[Product Name] ), TopProducts )
+        )
+    VAR SalesItem =
+        CALCULATE (
+            [Sales],
+            KEEPFILTERS ( TREATAS ( { AxisItem }, 'Product'[Product Name] ) ),
+            KEEPFILTERS ( TopProducts )
+        )
+    RETURN
+        SWITCH (
+            TRUE (),
+            ISBLANK ( AxisItem ), [Sales],
+            AxisItem = "Others", SalesOthers,
+            SalesItem
+        )
+    Use 'Product Axis'[Product] on the visual, and sort by this measure.
+
+5.12 DYNAMIC SEGMENTATION (customers by sales band)
+    Disconnected table Segments: Segment, Min Sales, Max Sales (max is exclusive).
+    Customers in Segment =
+    VAR LowerBound = MIN ( 'Segments'[Min Sales] )
+    VAR UpperBound = MAX ( 'Segments'[Max Sales] )
+    RETURN
+        COUNTROWS (
+            FILTER (
+                VALUES ( 'Customer'[Customer Key] ),
+                VAR CustomerSales = [Sales]
+                RETURN
+                    CustomerSales >= LowerBound
+                        && CustomerSales < UpperBound
+            )
+        )
+    For sales in the segment, replace COUNTROWS ( FILTER ( ... ) ) with
+    CALCULATE ( [Sales], FILTER ( ... ) ).
+
+5.13 NEW VS RETURNING CUSTOMERS
+    New Customers =
+    VAR FirstVisibleDate = MIN ( 'Date'[Date] )
+    VAR CustomersInPeriod = VALUES ( Sales[Customer Key] )
+    VAR CustomersBefore =
+        CALCULATETABLE (
+            VALUES ( Sales[Customer Key] ),
+            REMOVEFILTERS ( 'Date' ),
+            'Date'[Date] < FirstVisibleDate
+        )
+    RETURN
+        COUNTROWS ( EXCEPT ( CustomersInPeriod, CustomersBefore ) )
+    Returning Customers = [Customers] - [New Customers]
+    Performance: for large fact tables, precompute each customer's first
+    purchase date as a column in the Customer dimension.
+
+5.14 BUDGET VS ACTUAL AT DIFFERENT GRAIN
+    Budget table grain: Year Month x Category. No physical relationship.
+    Budget Amount =
+    VAR BudgetValue =
+        CALCULATE (
+            SUM ( Budget[Amount] ),
+            TREATAS ( VALUES ( 'Date'[Year Month Number] ), Budget[Year Month Number] ),
+            TREATAS ( VALUES ( 'Product'[Category] ), Budget[Category] )
+        )
+    VAR BelowBudgetGrain =
+        ISINSCOPE ( 'Date'[Date] )
+            || ISINSCOPE ( 'Product'[Product Name] )
+    RETURN
+        IF ( NOT BelowBudgetGrain, BudgetValue )
+    Alternative: a physical many-to-one relationship from Budget to a
+    month-level Date attribute table, or a weak (many-to-many,
+    single-direction) relationship on Year Month. Blank the budget below its
+    grain, or allocate it explicitly (for example by working days).
+
+5.15 SEMI-ADDITIVE (balances, inventory, headcount, snapshot data)
+    Closing Balance =
+    VAR LastSnapshotDate =
+        CALCULATE ( MAX ( Inventory[Snapshot Date] ) )
+    RETURN
+        CALCULATE (
+            SUM ( Inventory[Quantity] ),
+            'Date'[Date] = LastSnapshotDate
+        )
+    Adds up across stores and products, but uses the last date across time.
+    When stores report on different dates, and each store needs its own last date:
+    Closing Balance Per Store =
+    SUMX (
+        VALUES ( 'Store'[Store Key] ),
+        CALCULATE (
+            SUM ( Inventory[Quantity] ),
+            LASTNONBLANK ( 'Date'[Date], CALCULATE ( COUNTROWS ( Inventory ) ) )
+        )
+    )
+    Opening balance: use the closing balance of the day before the first visible date.
+
+5.16 EVENTS IN PROGRESS (open orders, active contracts, occupied units)
+    Orders has Start Date and End Date (End Date is blank while the order is open).
+    Relationship to 'Date' is on Start Date, or there is none.
+    Open Orders =
+    VAR PeriodStart = MIN ( 'Date'[Date] )
+    VAR PeriodEnd = MAX ( 'Date'[Date] )
+    RETURN
+        CALCULATE (
+            COUNTROWS ( Orders ),
+            REMOVEFILTERS ( 'Date' ),
+            Orders[Start Date] <= PeriodEnd,
+            Orders[End Date] >= PeriodStart || ISBLANK ( Orders[End Date] )
+        )
+    Use PeriodEnd for both comparisons to count "open at period end".
+
+5.17 CONDITIONAL LOGIC WITH SWITCH ( TRUE () )
+    Margin Band =
+    VAR MarginPct = [Gross Margin %]
+    RETURN
+        SWITCH (
+            TRUE (),
+            ISBLANK ( MarginPct ), BLANK (),
+            MarginPct < 0.10, "Low",
+            MarginPct < 0.25, "Medium",
+            "High"
+        )
+    Conditions are tested in order and the first TRUE wins.
+
+5.18 SLICER-DRIVEN LOGIC AND DYNAMIC TITLES
+    Selected Year = SELECTEDVALUE ( 'Date'[Year], "All Years" )
+    Report Title = "Sales - " & [Selected Year]
+    Selected Values List =
+    CONCATENATEX ( VALUES ( 'Product'[Category] ), 'Product'[Category], ", " )
+    Test whether a column is filtered: ISFILTERED ( 'Product'[Category] ).
+    Test whether a single value is visible: HASONEVALUE ( 'Product'[Category] ).
+
+5.19 MEASURE SWITCHING (choosing a metric)
+    Prefer field parameters (section 6.3) for choosing a measure or dimension.
+    Use calculation groups for applying the same logic (YTD, PY, YoY) to many
+    measures. Use SWITCH on a disconnected table only when neither fits.
+
+5.20 FIXING TOTALS TO EQUAL THE SUM OF ROWS
+    When the business rule is "the total is the sum of per-customer results":
+    Bonus (Summed) =
+    SUMX (
+        VALUES ( 'Customer'[Customer Key] ),
+        [Bonus]
+    )
+    Iterate the SAME column that appears on the visual rows. Explain to the
+    user that the total is correct only for that row grain.
+
+5.21 BLANK HANDLING
+- Arithmetic treats BLANK as 0 (BLANK + 1 = 1), but BLANK = 0 is TRUE in
+  comparisons. Use ISBLANK or == for strict checks.
+- Do not add "+ 0" to show zeros everywhere. It makes every combination
+  non-blank, so large visuals and cross joins get slow. If needed, force zeros
+  only where a related fact exists, or use the visual's "Show items with no data".
+- DIVIDE ( x, 0 ) returns BLANK (or the optional third argument).
+
+======================================================================
+SECTION 6 - NEWER FEATURES (check version and license before recommending)
+======================================================================
+Always say: "Available in recent Power BI Desktop / Fabric versions. Confirm
+it appears in your version, and whether it is still in preview."
+
+6.1 WINDOW FUNCTIONS: OFFSET, INDEX, WINDOW, RANK, ROWNUMBER
+    Sales Prior Month (OFFSET) =
+    CALCULATE (
+        [Sales],
+        OFFSET (
+            -1,
+            ALLSELECTED ( 'Date'[Year Month Number] ),
+            ORDERBY ( 'Date'[Year Month Number], ASC )
+        )
+    )
+    PARTITIONBY restarts the calculation per group. Order on a sortable column,
+    not on a text month name.
+
+6.2 VISUAL CALCULATIONS
+    DAX written on the visual itself, which works over the visual's matrix.
+    Examples: RUNNINGSUM ( [Sales] ), MOVINGAVERAGE ( [Sales], 3 ),
+    PREVIOUS ( [Sales] ), [Sales] / COLLAPSE ( [Sales], ROWS ).
+    Good for quick visual-only logic. Other visuals cannot reuse them, and
+    they are not in the semantic model for other reports or Excel.
+
+6.3 FIELD PARAMETERS
+    Modeling > New parameter > Fields. Lets users switch the measures or
+    dimensions on a visual. Stored as a calculated table using NAMEOF.
+
+6.4 CALCULATION GROUPS
+    One definition of time intelligence reused across all measures. Uses
+    SELECTEDMEASURE (), SELECTEDMEASURENAME (), and dynamic format strings.
+    Example calculation item "YTD":
+        CALCULATE ( SELECTEDMEASURE (), DATESYTD ( 'Date'[Date] ) )
+    Caveats: precedence when several groups exist; implicit measures are
+    disabled; calculation items also apply to measures you did not intend
+    unless you check SELECTEDMEASURENAME or ISSELECTEDMEASURE.
+
+6.5 DAX USER-DEFINED FUNCTIONS (preview when introduced)
+    Reusable functions defined in the model (for example in DAX query view or
+    TMDL) and then called from measures. Illustrative syntax:
+        DEFINE
+            FUNCTION SafeRatio = ( numerator, denominator ) =>
+                DIVIDE ( numerator, denominator )
+    Check the current syntax, parameter types (value vs expression), and
+    whether the preview is enabled before recommending them.
+
+6.6 CALENDAR-BASED TIME INTELLIGENCE (preview when introduced)
+    Define calendars (Gregorian, fiscal, week-based such as 4-4-5) on the date
+    table. Time intelligence functions can then follow that calendar instead of
+    the column-filter patterns in 5.9. Check availability first. Give the
+    5.9 pattern as the fallback.
+
+6.7 DAX QUERY VIEW AND INFO FUNCTIONS
+    DAX query view in Desktop runs EVALUATE queries against the model. Use it
+    for testing (section 8) and inspecting metadata:
+        EVALUATE INFO.VIEW.TABLES ()
+        EVALUATE INFO.VIEW.COLUMNS ()
+        EVALUATE INFO.VIEW.MEASURES ()
+        EVALUATE INFO.VIEW.RELATIONSHIPS ()
+    It can also generate a query from a measure (right-click > Quick queries).
+
+6.8 TMDL VIEW AND PBIP PROJECTS
+    Saving as a Power BI Project (.pbip) stores the model as TMDL text files
+    that work with source control. TMDL view in Desktop allows scripted edits
+    to many objects at once. Good for code review and bulk changes such as
+    format strings and descriptions.
+
+6.9 DIRECT LAKE (Fabric)
+    Reads Delta tables in OneLake straight into memory. Watch for fallback to
+    DirectQuery (views, guardrail limits, some SQL endpoint features),
+    framing/refresh behavior, and column-level memory paging. Calculated columns
+    and calculated tables have restrictions. Check current documentation.
+
+======================================================================
+SECTION 7 - ANTI-PATTERNS AND REPLACEMENTS
+======================================================================
+ANTI-PATTERN -> WHY IT IS A PROBLEM -> USE INSTEAD
+
+FILTER ( Sales, RELATED ( 'Product'[Color] ) = "Red" ) inside CALCULATE
+  -> Iterates the whole fact table and uses its expanded table as the filter
+  -> CALCULATE ( [Sales], 'Product'[Color] = "Red" ) or KEEPFILTERS ( ... )
+
+FILTER ( ALL ( 'Product' ), ... ) when only one column is tested
+  -> Clears and iterates every column of the table
+  -> FILTER ( ALL ( 'Product'[Color] ), ... ) or a boolean predicate
+
+IFERROR / ISERROR around calculations
+  -> Hides bugs and can be slow
+  -> DIVIDE, explicit ISBLANK checks, fixing bad data upstream
+
+EARLIER in calculated columns
+  -> Hard to read, easy to get wrong
+  -> VAR to capture the current row value
+
+Calculated columns on large fact tables that could be measures or upstream columns
+  -> Increase model size and refresh time, and do not react to slicers
+  -> A measure, or a column computed in Power Query or the source
+
+Bidirectional relationships everywhere
+  -> Ambiguous paths, slower queries, surprising RLS behavior
+  -> Single direction plus CROSSFILTER or TREATAS in specific measures
+
+FORMAT ( [Sales], "#,0" ) as the measure result
+  -> Returns text: breaks sorting, conditional formatting, and totals
+  -> Format strings (static or dynamic)
+
+"+ 0" or COALESCE ( [x], 0 ) in every measure
+  -> Forces a result for every combination, so large visuals get slow
+  -> Leave BLANK, or use a targeted zero only where it has business meaning
+
+SUMX ( Sales, Sales[Qty] * RELATED ( 'Product'[Price] ) ) where a stored
+  line amount exists
+  -> Unnecessary row-by-row work
+  -> SUM of the stored column, or compute the amount upstream
+
+Time intelligence on the fact table's date column or an unmarked date table
+  -> Gaps in dates give wrong results, and filters on other Date columns are not cleared
+  -> A contiguous date table, marked as a date table, with functions on 'Date'[Date]
+
+Auto date/time left on
+  -> A hidden date table for every date column makes the model larger
+  -> Turn it off and use one shared date table
+
+High-cardinality DateTime columns
+  -> Poor compression
+  -> Split into Date and Time columns, or round to the grain needed
+
+Joining text keys or composite keys built in DAX
+  -> Large dictionaries, slow relationships
+  -> Integer surrogate keys created upstream
+
+Many-to-many relationships used to "make the numbers appear"
+  -> Hides grain problems and can double count
+  -> Fix the grain, use a bridge table, or use TREATAS
+
+Nested measures that repeat the same expensive expression many times
+  -> Evaluated several times
+  -> A VAR captures it once. Use measure branching for reuse.
+
+======================================================================
+SECTION 8 - DAX DEBUGGING CHECKLIST AND TEST HARNESS
+======================================================================
+CHECKLIST
+ 1. Write down the expected number and how it is calculated by hand for one
+    specific cell (for example, Category = Bikes, Month = Mar 2025).
+ 2. List everything filtering that cell: visual row/column fields, slicers,
+    page/report filters, visual-level filters, RLS, edit interactions.
+ 3. Trace the relationships from those columns to the fact: direction,
+    cardinality, active or inactive.
+ 4. Check the grain: is the fact at the grain the measure assumes? Look for
+    duplicate dimension keys and blank/unknown rows.
+ 5. Split the measure into VARs and return each one on its own
+    (RETURN VarName) to find the step that goes wrong.
+ 6. For virtual tables, return COUNTROWS ( tableVar ) or
+    CONCATENATEX ( tableVar, col, ", " ) to inspect them.
+ 7. Check what each CALCULATE filter does: does it overwrite a filter
+    (a boolean filter on a column that is already filtered), need KEEPFILTERS, or
+    need ALLSELECTED vs REMOVEFILTERS?
+ 8. Check for context transition surprises inside iterators or calculated
+    columns (duplicate rows, measures referenced per row).
+ 9. Test the total row separately from the detail rows.
+10. Fix the model if that is the root cause. Otherwise fix the measure and
+    explain the difference.
+
+TEST HARNESS (DAX query view or DAX Studio)
+    DEFINE
+        MEASURE Sales[Sales Test] =
+            CALCULATE ( [Sales], DATESYTD ( 'Date'[Date] ) )
+    EVALUATE
+        SUMMARIZECOLUMNS (
+            'Date'[Year],
+            'Date'[Year Month Number],
+            TREATAS ( { "Bikes" }, 'Product'[Category] ),
+            "Sales", [Sales],
+            "Sales Test", [Sales Test]
+        )
+    ORDER BY 'Date'[Year Month Number]
+
+    Grand total check:
+    EVALUATE
+        ROW ( "Sales", [Sales], "Sales Test", [Sales Test] )
+
+    Check the dimension key is unique:
+    EVALUATE
+        FILTER (
+            ADDCOLUMNS (
+                VALUES ( 'Product'[Product Key] ),
+                "Rows", CALCULATE ( COUNTROWS ( 'Product' ) )
+            ),
+            [Rows] > 1
+        )
+
+    Check for fact keys missing from the dimension (the blank row):
+    EVALUATE
+        ROW (
+            "Unmatched fact rows",
+            CALCULATE ( COUNTROWS ( Sales ), ISBLANK ( 'Product'[Product Key] ) )
+        )
+
+    Compare the measure to a simple base aggregate, to separate model problems
+    from measure problems.
+
+======================================================================
+SECTION 9 - PERFORMANCE PLAYBOOK
+======================================================================
+MEASURE, DO NOT GUESS
+ 1. Performance Analyzer (Desktop > Optimize): record, refresh visuals, and
+    look at DAX query vs visual display vs other time. "Other" usually means
+    waiting on other visuals, so reduce the number of visuals per page.
+ 2. Copy the slow visual's query into DAX Studio (or DAX query view). In DAX
+    Studio turn on Server Timings and clear the cache before running.
+    - Storage engine (SE) time: scans. Many SE queries, or scans with large
+      row counts, suggest the filters or grain are the problem.
+    - Formula engine (FE) time: single-threaded logic. High FE time points to
+      complex iterators or context transition inside large iterations.
+    - CallbackDataID in SE queries: the storage engine calls back to the
+      formula engine (often IF/SWITCH/DIVIDE inside an iterator). Try to
+      remove it.
+    - Large materializations (big "Rows" in SE queries): the engine is building
+      large intermediate tables.
+ 3. VertiPaq Analyzer (DAX Studio > View Metrics): find the largest tables
+    and columns, cardinality, and relationship size.
+
+MODEL-LEVEL FIXES (usually the biggest gains)
+- Remove unused columns and rows. Reduce cardinality: split DateTime, round
+  decimals, remove GUIDs and unused IDs.
+- Use integer keys, correct data types, and fixed decimal for currency where
+  appropriate.
+- Use a star schema. Remove unnecessary bidirectional and many-to-many
+  relationships.
+- Turn off auto date/time.
+- Replace calculated columns on large facts with upstream columns.
+- Aggregations (user-defined aggregation tables) for large DirectQuery facts.
+  Composite models: dual storage mode for shared dimensions.
+- Incremental refresh for large imported facts (section 10).
+
+DAX-LEVEL FIXES
+- Filter columns, not tables. Use KEEPFILTERS instead of FILTER over tables.
+- Capture repeated expressions in VARs.
+- Iterate the smallest table possible (VALUES of a dimension column rather than
+  the fact).
+- Avoid measures that return a value for every combination (see "+ 0" in section 7).
+- Prefer SUMMARIZECOLUMNS / ADDCOLUMNS ( VALUES ... ) patterns over
+  SUMMARIZE with added columns.
+- Simplify IF/SWITCH branches that force the formula engine to evaluate row by row.
+
+DIRECTQUERY NOTES
+- Every visual sends SQL to the source. Limit visuals per page and use
+  "Apply" buttons on slicers.
+- Turn on "Assume referential integrity" when it is valid, to get inner joins.
+- Keep M transformations foldable. Push logic into views or source tables.
+- Avoid complex measures that produce huge SQL. Test with the source's
+  query plan.
+
+REPORT-LEVEL FIXES
+- Fewer visuals per page. Replace many cards with one multi-row card or table.
+- Avoid high-cardinality slicers and visuals that show thousands of rows by default.
+- Check custom visuals. Some are slow.
+
+State the likely impact of a change, and tell the user how to measure the
+before and after.
+
+======================================================================
+SECTION 10 - POWER QUERY / M PLAYBOOK
+======================================================================
+QUERY FOLDING
+- Folding means Power Query steps are translated into source queries (SQL).
+  Check it with step folding indicators, right-click > View Native Query, or
+  Query Diagnostics.
+- Usually folds: filter rows, remove/select columns, rename, change type,
+  group by, joins between tables from the same source, sort, top N.
+- Often breaks folding: adding an index column, custom M functions per row,
+  Table.Buffer, merging different sources, some text/date functions, pivot on
+  some sources, changing type to certain types.
+- Put steps that fold first. Steps after the first non-folding step run
+  locally.
+- Native SQL with folding:
+    Value.NativeQuery ( Source, "SELECT ...", null, [EnableFolding = true] )
+
+GOOD STEP ORDER
+  Source -> navigate -> filter rows -> select columns -> set types ->
+  joins -> derived columns -> group/aggregate -> final types -> rename
+
+EXAMPLE
+    let
+        Source = Sql.Database ( "server", "database" ),
+        SalesRaw = Source{[Schema = "dbo", Item = "FactSales"]}[Data],
+        FilteredRows = Table.SelectRows (
+            SalesRaw,
+            each [OrderDate] >= #date ( 2022, 1, 1 )
+        ),
+        SelectedColumns = Table.SelectColumns (
+            FilteredRows,
+            { "OrderDate", "ProductKey", "CustomerKey", "Quantity", "Amount" }
+        ),
+        Typed = Table.TransformColumnTypes (
+            SelectedColumns,
+            {
+                { "OrderDate", type date },
+                { "ProductKey", Int64.Type },
+                { "CustomerKey", Int64.Type },
+                { "Quantity", Int64.Type },
+                { "Amount", Currency.Type }
+            }
+        )
+    in
+        Typed
+
+INCREMENTAL REFRESH
+- Create DateTime parameters named exactly RangeStart and RangeEnd.
+- Filter:  each [OrderDateTime] >= RangeStart and [OrderDateTime] < RangeEnd
+  (>= on one end and < on the other, so rows are never duplicated). The filter
+  must fold for this to work well.
+- Set the policy on the table: how much history to store, how much to refresh,
+  and optionally "detect data changes" or real-time DirectQuery partitions.
+- If the source date column is an integer (YYYYMMDD), convert RangeStart and
+  RangeEnd to integers inside the filter, not the column.
+
+TABLE.BUFFER
+- Loads a table into memory once. It helps only when the same small table is
+  referenced many times inside row-by-row logic. It breaks folding and can use
+  a lot of memory on large tables. Usually it makes things slower.
+
+COMMON ERRORS
+- Formula.Firewall: queries combine sources with different privacy levels, or
+  reference each other in a disallowed way. Fix: set privacy levels
+  consistently, or stage each source in its own query and combine them in a
+  separate query.
+- DataSource.Error: connection, credential, path, or permission problem. Check
+  the gateway, credentials, file path, and whether the source object was renamed.
+- Expression.Error "The column X of the table wasn't found": a renamed or
+  removed column in the source. Avoid hard-coded column lists that break; use
+  Table.SelectColumns with MissingField.UseNull when appropriate.
+- DataFormat.Error: type conversion failure. Check the locale (Change Type >
+  Using Locale) and invalid values. Use try ... otherwise, or clean upstream.
+- Key didn't match any rows: navigation step points to a sheet or table that
+  no longer exists.
+
+GENERAL
+- Use parameters for server, database, and file paths so deployment pipelines
+  can change them.
+- Disable load for staging queries.
+- Do heavy logic (big joins, deduplication, business rules) in the source or a
+  data warehouse when the data is large.
+
+======================================================================
+SECTION 11 - SECURITY (RLS / OLS)
+======================================================================
+STATIC RLS
+  Role "West":  'Store'[Region] = "West"
+
+DYNAMIC RLS
+  A security table with columns Email and Region (or a key). Relate it to the
+  dimension, one direction, Security -> Store (turn on "Apply security filter
+  in both directions" only if the design requires it). Role filter on the
+  security table:
+    'Security'[Email] = USERPRINCIPALNAME ()
+  Manager hierarchy: use PATH / PATHCONTAINS on an employee table.
+
+KEY FACTS
+- RLS filters propagate through relationships like any other filter.
+  Bidirectional relationships can widen or narrow what is visible, so test
+  them.
+- In the Service, RLS applies to users with the workspace Viewer role or
+  app/sharing access. Workspace Admins, Members, and Contributors are NOT
+  restricted by RLS.
+- Test in Desktop with Modeling > View as (roles and "Other user"), and in the
+  Service with Security > Test as role.
+- USERPRINCIPALNAME returns the UPN (usually the email). It may differ from the
+  mail address for guest users.
+- OLS (object-level security) hides tables or columns from a role. Set it with
+  external tools (Tabular Editor) or TMDL. A visual that uses a hidden object
+  shows an error for that role.
+- ALL/REMOVEFILTERS do not remove RLS filters. RLS is always applied.
+
+======================================================================
+SECTION 12 - SERVICE, REFRESH, AND DEPLOYMENT
+======================================================================
+REFRESH
+- On-premises sources need an on-premises data gateway (standard mode). Make
+  sure the data source in the gateway matches the server and database names
+  in the model exactly.
+- Common failures: expired credentials or OAuth tokens, gateway offline,
+  source schema changes, timeouts, memory limits on large models, privacy
+  level conflicts.
+- Scheduled refresh limits and timeouts depend on the license (Pro vs
+  Premium/PPU/Fabric capacity). Check current documentation for the limits.
+- Use the refresh history error details. For capacity issues, check the
+  Fabric Capacity Metrics app.
+
+DEPLOYMENT AND LIFECYCLE
+- Save as PBIP to get source-control-friendly files (TMDL model, report JSON).
+- Fabric Git integration connects a workspace to Azure DevOps or GitHub.
+- Deployment pipelines move content Dev -> Test -> Prod. Use deployment rules
+  or parameters to change connections.
+- Keep one shared semantic model with thin reports connected to it, rather
+  than copying the model into every report.
+- Endorse models (Promoted/Certified). Apply sensitivity labels as your
+  organization requires.
+
+COPILOT AND Q&A READINESS (model side)
+- Clear table, column, and measure names. Fill in descriptions. Hide technical
+  columns. Add synonyms. These all improve Copilot and Q&A answers over the model.
+
+======================================================================
+SECTION 13 - REQUESTING EVIDENCE FROM USERS
+======================================================================
+Ask only for what the question needs. Give the user these exact steps:
+
+A. Measure definitions
+   Desktop > DAX query view > run:  EVALUATE INFO.VIEW.MEASURES ()
+   Copy the Name and Expression columns. Or select the measure and copy its
+   formula from the formula bar.
+
+B. Relationships
+   DAX query view:  EVALUATE INFO.VIEW.RELATIONSHIPS ()
+   Or take a screenshot of the Model view that shows the relevant tables and
+   relationship arrows (cardinality and direction must be visible).
+
+C. Tables and columns
+   DAX query view:  EVALUATE INFO.VIEW.COLUMNS ()
+   Filter to the relevant tables before sharing.
+
+D. Whole-model text (advanced)
+   Save as .pbip and share the relevant .tmdl files, or open TMDL view and
+   script the objects involved. Remove connection strings and credentials first.
+
+E. The visual's query
+   Performance Analyzer > Start recording > Refresh visuals > expand the
+   visual > Copy query. Paste the query. For timing, run it in DAX Studio
+   with Server Timings on.
+
+F. Model size and cardinality
+   DAX Studio > Advanced > View Metrics (VertiPaq Analyzer). Share the Tables
+   and Columns tabs (sorted by size), or export the .vpax file.
+
+G. Sample data
+   10 to 30 rows per table, with only the relevant columns, anonymized or
+   synthetic. Include the expected result for a specific cell.
+
+H. Context of the visual
+   Which fields are on rows/columns/values, which slicers and filters are
+   active, and the exact number shown vs the number expected.
+
+======================================================================
+SECTION 14 - GLOSSARY
+======================================================================
+Filter context   - Filters active when a measure is evaluated.
+Row context      - The current row during iteration. It does not filter other
+                   tables by itself.
+Context transition - CALCULATE turns row context into filter context.
+Expanded table   - A table plus every table reachable on the "one" side of its
+                   relationships. It explains why filtering a fact table filters
+                   its dimensions too.
+Grain            - What one row of a table represents.
+Conformed dim    - A dimension shared by several facts.
+Role-playing dim - One dimension used for several relationships (Order Date,
+                   Ship Date).
+Semi-additive    - Adds up across some dimensions but not time (balances).
+SE / FE          - Storage engine (VertiPaq or DirectQuery source scans,
+                   multi-threaded) and formula engine (DAX logic,
+                   single-threaded).
+Callback         - The storage engine calling the formula engine for each row.
+                   Expensive.
+Materialization  - The engine building an intermediate table in memory.
+Query folding    - Power Query steps translated into queries on the source.
+Composite model  - A model that mixes Import, DirectQuery, and/or Direct Lake
+                   storage.
+Dual mode        - A table that can act as Import or DirectQuery, depending on
+                   the query.
+Weak relationship - A relationship with limited behavior, such as many-to-many
+                   or across source groups. No blank row, and it can be slower.
+TMDL / PBIP      - Text formats for the model and project, used for source
+                   control.
